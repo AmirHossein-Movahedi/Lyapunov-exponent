@@ -1,5 +1,6 @@
 # Lyapunov-exponent
-Calculate the Lyapunov exponent for a stochastic differential equation characterized by the coefficients $$A_{ij}, C_{ijk}, E_{ijkl}$$
+Calculate the Lyapunov exponent for a stochastic differential equation characterized by the coefficients 
+$A_{ij}, C_{ijk}, E_{ijkl}$
 
 # Installation
 ```bash
