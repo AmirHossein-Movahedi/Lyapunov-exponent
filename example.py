@@ -1,4 +1,4 @@
-from lyapunovv.lyapunov import Lyapunov
+from Lyapunovv import Lyapunov
 import numpy as np
 
 L = Lyapunov(start_time=0.0, end_time=50.0, dt=0.01, initial_condition=np.array([0.1, 0.2, 0.3]))

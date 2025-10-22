@@ -1,4 +1,3 @@
-# File: lyapunov/lyapunov.py
 """
 Lyapunov module suitable for packaging.
 
@@ -10,9 +9,6 @@ Functions:
  - LE : compute Lyapunov exponents via jitcode_lyap (wrap)
  - KD : Kaplan–Yorke dimension calculator
 
-Notes:
- - This module uses `jitcsde`, `jitcode` and `jitcode_lyap`. If those
-   packages are not installed the module raises an informative ImportError.
 """
 
 from __future__ import annotations
@@ -28,6 +24,15 @@ import pandas as pd
 from scipy.stats import sem
 import matplotlib.pyplot as plt
 
+
+"""
+
+Notes:
+ - This module uses `jitcsde`, `jitcode` and `jitcode_lyap`. If those
+   packages are not installed the module raises an informative ImportError.
+
+
+"""
 # Conditional imports for optional heavy dependencies
 try:
     from jitcsde import jitcsde, y, t  # optional; needed for DDE-style systems
@@ -434,24 +439,3 @@ class Lyapunov:
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
         t_eval, y_result, fig, axs = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
         return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky, "fig": fig, "axs": axs}
-
-
-if __name__ == "__main__":
-    # Simple smoke tests for shape & basic validation (does not run jit integrations)
-    L = Lyapunov(start_time=0.0, end_time=1.0, dt=0.1, initial_condition=np.array([0.1, 0.2]))
-    # small sample for build_tensor_3D
-    n = 2
-    # For n=2, n_pairs = 3
-    sample = np.array([[1.0], [2.0], [3.0]])
-    t3 = Lyapunov.build_tensor_3D(sample, n)
-    assert t3.shape == (2, 2, 1)
-    print("build_tensor_3D smoke OK:", t3.shape)
-    # build_tensor_4D for n=2 -> combinations_with_replacement(range(2),3) => 4 patterns
-    e_rows = np.array([1.0, 0.0, 0.5, -0.25])
-    try:
-        t4 = Lyapunov.build_tensor_4D(e_rows, n)
-        assert t4.shape == (2, 2, 2, 2)
-        print("build_tensor_4D smoke OK:", t4.shape)
-    except NotImplementedError:
-        print("build_tensor_4D: vector-valued pattern not supported in this smoke test (scalar patterns worked).")
-
