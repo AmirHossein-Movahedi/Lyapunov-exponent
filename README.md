@@ -1,7 +1,8 @@
 # Lyapunov-exponent
 Calculate the Lyapunov exponent for a stochastic differential equation characterized by the coefficients 
+```Latex
 $A_{ij}, C_{ijk}, E_{ijkl}$
-
+``
 # Installation
 ```bash
 git clone 
