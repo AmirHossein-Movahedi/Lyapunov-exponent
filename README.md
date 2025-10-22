@@ -1,5 +1,5 @@
 # Lyapunov-exponent
-Calculate the Lyapunov exponent for a stochastic differential equation characterized by the coefficients $A_{ij}, C_{ijk}, E_{ijkl}$
+Calculate the Lyapunov exponent for a stochastic differential equation characterized by the coefficients 
 
 # Installation
 ```bash
@@ -12,7 +12,7 @@ pip install -e .
 Below is a basic example 
 
 ```python
-from Lyapunovv import Lyapunov
+from Lyapunovv import lyapunov
 import numpy as np
 
 L = Lyapunov(start_time=0.0, end_time=50.0, dt=0.01, initial_condition=np.array([0.1, 0.2, 0.3]))
