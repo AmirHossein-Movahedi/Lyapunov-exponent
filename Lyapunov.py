@@ -11,54 +11,45 @@ from scipy.stats import sem
 from numpy.typing import NDArray
 
 
-
-
 class Lyapunov:
 
     def __init__(self,
-                start_time: Union[int, None] = 0,
-                end_time: Union[int, None]= None,
-                dt: Union[float, None] = None,
-                order: Union[int, None] = None,
-                # alpha: Union[float, None] = None,
-                # A: Union[np.ndarray, None] = None,
-                # B: Union[np.ndarray, None] = None,
-                # C: Union[np.ndarray, None] = None,
+                start_time:Union[float, None] = 0.001,
+                end_time:Union[float, None]= None,
+                dt:Union[float, None] = None,
+                initial_condition:Union[int, None] = None,
         ):
         """
-            explain the formula and the stochastic equation of that 
+            the necessary values for Lyapunov
         """
         if end_time is None:
             raise ValueError("Need the end time")
         elif dt is None:
             raise ValueError("the dt is needed")
-        elif order is None:
-            raise ValueError("order ne")
+        elif initial_condition is None:
+            raise ValueError("order needed")
 
-        self.alpaha = alpha
-        self.A = A
-        self.B = B
-        self.C = C
+        self.t_i = start_time
+        self.t_f = end_time
         self.dt = dt
+        self.initial_condition = initial_condition
     
-
-
-
+    
     @staticmethod
-    def build_tensor_3D(array, n):
+    def build_tensor_3D(array:NDArray, number_time_series:int):
         array = np.asarray(array)
-        num_pairs_expected = n * (n + 1) // 2
+        num_pairs_expected = number_time_series * (number_time_series + 1) // 2
 
         if array.ndim != 2:
             raise ValueError("rows_array must be 2D with shape (num_pairs, m).")
         if array.shape[0] != num_pairs_expected:
-            raise ValueError(f"rows_array has {array.shape[0]} rows but expected {num_pairs_expected} for n={n}.")
+            raise ValueError(f"rows_array has {array.shape[0]} rows but expected {num_pairs_expected} for n={number_time_series}.")
         
         m = array.shape[1]
         # generate pairs in lexicographic order (i <= j)
-        pairs = [(i, j) for i in range(n) for j in range(i, n)]
+        pairs = [(i, j) for i in range(number_time_series) for j in range(i, number_time_series)]
 
-        tensor_3D = np.zeros((n, n, m), dtype=array.dtype)
+        tensor_3D = np.zeros((number_time_series, number_time_series, m), dtype=array.dtype)
 
         for (i, j), values in zip(pairs, array):
             tensor_3D[i, j, :] = values
@@ -68,19 +59,16 @@ class Lyapunov:
     
 
     @staticmethod
-    def build_tensor_4D(array, n):
+    def build_tensor_4D(array:NDArray, number_time_series:int):
         array = np.asarray(array)
-        # array = np.array(array)
-
-        # initialize tensor
-        tensor_4D = np.zeros((n, n, n, n))
+        tensor_4D = np.zeros((number_time_series, number_time_series, number_time_series, number_time_series))
         
         # generate all index patterns of length 3 with non-decreasing order
         # e.g., for n=4 → (0,0,0), (0,0,1), ..., (3,3,3)
         patterns = []
-        for i in range(n):
-            for j in range(i, n):
-                for k in range(j, n):
+        for i in range(number_time_series):
+            for j in range(i, number_time_series):
+                for k in range(j, number_time_series):
                     patterns.append((i, j, k))
         
         # Now each row of matrix_array corresponds to one of these patterns
@@ -109,8 +97,9 @@ class Lyapunov:
         
         return tensor_4D
     
+
     @staticmethod
-    def jit_equation_0_3(Const, A, B, E):
+    def jit_equation_0_3(alpha:NDArray, A:NDArray, C:NDArray, E:NDArray):
         """
         Constructs the derivatives ẋ_i(t) for a system, including:
         Const[i]        : constant offsets
@@ -134,10 +123,10 @@ class Lyapunov:
         eq : list
             A list of symbolic expressions suitable for JIT compilation with jitcsde.
         """
-        # Convert all inputs to numpy arrays
-        Const = np.asarray(Const)
+        # Convert all inputs to numpy asarray
+        alpha = np.asarray(alpha)
         A = np.asarray(A)
-        B = np.asarray(B)
+        C = np.asarray(C)
         E = np.asarray(E)
         
         n = A.shape[0]
@@ -145,11 +134,10 @@ class Lyapunov:
         for i in range(n):
             # Build up the i-th equation
             expression = (
-                Const  # constant term
-                # Linear term
-                + sum(A[i, j] * y(j) for j in range(n))
+                alpha                                                   # constant term
+                + sum(A[i, j] * y(j) for j in range(n))                 # Linear term
                 # Quadratic term, summing only for j <= k to avoid duplicates
-                + sum(B[i, j, k] * y(j) * y(k) 
+                + sum(C[i, j, k] * y(j) * y(k) 
                     for j in range(n) 
                     for k in range(j, n))
                 # Cubic term, summing only for j <= k <= l
@@ -162,26 +150,24 @@ class Lyapunov:
         return eq
     
 
-
-
-
+    ################################### PLOT ########################################
     @staticmethod
-    def plot_trajectory(f, y0, t_span, dt):
+    def plot_trajectory(f, initial_condition, t_span, dt):
         # Initialize the JIT-compiled ODE system
         ode = jitcode(f)
         ode.set_integrator("dopri5")
-        ode.set_initial_value(y0, t_span[0])
+        ode.set_initial_value(initial_condition, t_span[0])
 
         # Create time evaluation points
         t_eval = np.arange(t_span[0], t_span[1], dt)
-        y_result = np.empty((len(t_eval), len(y0)))
+        y_result = np.empty((len(t_eval), len(initial_condition)))
 
         # Integrate the system
         for i, t in enumerate(t_eval):
             y_result[i] = ode.integrate(t)
 
         # Plot the trajectory
-        if len(y0) == 2:
+        if len(initial_condition) == 2:
             plt.plot(y_result[:, 0], y_result[:, 1], lw=0.5)
             plt.xlabel('y0')
             plt.ylabel('y1')
@@ -189,7 +175,7 @@ class Lyapunov:
             plt.figure(figsize=(15,5))
             plt.plot(t_eval, y_result[:, 0], label='y0')
             plt.plot(t_eval, y_result[:, 1], label='y1')
-        elif len(y0) == 3:
+        elif len(initial_condition) == 3:
             fig = plt.figure()
             ax = fig.add_subplot(111, projection='3d')
             ax.plot(y_result[:, 0], y_result[:, 1], y_result[:, 2], lw=0.5)
@@ -201,22 +187,22 @@ class Lyapunov:
             plt.plot(t_eval, y_result[:, 0], label='y0')
             plt.plot(t_eval, y_result[:, 1], label='y1')
             plt.plot(t_eval, y_result[:, 2], label='y2')
-        elif len(y0) > 3:
-            for i in range(len(y0)):
+        elif len(initial_condition) > 3:
+            for i in range(len(initial_condition)):
                 plt.figure(figsize=(10, 3))
                 plt.plot(t_eval, y_result[:, i], label=f'y{i}')
         return y_result
 
 
     @staticmethod
-    def LE(f,initial_state,tspan):
+    def LE(f,initial_condition,t_span):
         n = len(f)
         ODE = jitcode_lyap(f, n_lyap=n)
         ODE.set_integrator("dopri5")
-        ODE.set_initial_value(initial_state,0.0)
+        ODE.set_initial_value(initial_condition,0.0)
 
         lyaps = []
-        for time in tspan:
+        for time in t_span:
             lyaps.append(ODE.integrate(time)[1])
 
         # converting to NumPy array for easier handling
@@ -251,38 +237,37 @@ class Lyapunov:
                 return D.tolist()
 
 
-    def direct_method(self, path: str, LE, KD, plot_trajectory, build_tensor_3D, build_tensor_4D, jit_equation_0_3, initial_conditions, order: int = 2):
+    def direct_method(self, path:str, order:int, build_tensor_3D, build_tensor_4D, jit_equation_0_3, plot_trajectory, LE, KD):
+        #load data
         df_array = pd.read_csv(path).to_numpy()
         hints_calculator = hints.kmcc(ts_array=df_array, dt=self.dt, interaction_order=[i for i in range(0, order+1)])
         coefficient = hints_calculator.get_coefficients()
-        n = len(df_array[0])
-        alpah = coefficient.iloc[] ################################# must be compelete
-        A = coefficient.iloc[:n, :]
-        C = coefficient.iloc[n:int((n*(n+1))/2)+n, :]
-        E = coefficient.iloc[int((n*(n+1))/2)+n:, :]
+        number_time_series = len(df_array[0])
 
-        C = build_tensor_3D(C, n)
-        E = build_tensor_4D(E, n)
+        alpha = np.asarray(coefficient.iloc[]) ################################# must be compelete
+        A = np.asarray(coefficient.iloc[:number_time_series, :])
+        C = np.asarray(coefficient.iloc[number_time_series:int((number_time_series*(number_time_series+1))/2)+number_time_series, :])
+        E = np.asarray(coefficient.iloc[int((number_time_series*(number_time_series+1))/2)+number_time_series:, :])
 
-        # Make sure your inputs are properly shaped numpy arrays
-        f = jit_equation_0_3(alpah, A, C, E)
-    
-        tspan = np.arange(0.00001, 10000.0, self.dt) #10000
-        lyaps_np_th=LE(f,initial_conditions,tspan)
+        C = build_tensor_3D(C, number_time_series)
+        E = build_tensor_4D(E, number_time_series)
+
+        f = jit_equation_0_3(alpha, A, C, E)
+        t_span = np.arange(self.t_i, self.t_f, self.dt) 
+        lyaps_np_th=LE(f,self.initial_condition,t_span)
         KD(np.mean(lyaps_np_th[1000:,:],axis=0))
-        ts_np_th = plot_trajectory(f, y0=initial_conditions, t_span=(0,1000), dt=self.dt)
+        ts_np_th = plot_trajectory(f, initial_condition=self.initial_condition, t_span=(self.t_i,self.t_f), dt=self.dt)
 
 
-    def Data_methods(self, LE, KD, plot_trajectory, build_tensor_3D, build_tensor_4D, jit_equation_0_3, initial_conditions,
-                    alpah:int, A:NDArray, C:NDArray, E:NDArray, order: int = 2): 
-    
-
+    def Data_methods(self, alpha:NDArray, A:NDArray, C:NDArray,  E:NDArray, build_tensor_3D, build_tensor_4D, jit_equation_0_3,
+                     plot_trajectory, LE, KD):
+        
         # Make sure your inputs are properly shaped numpy arrays
-        f = jit_equation_0_3(alpah, A, C, E)
-        tspan = np.arange(0.00001, 10000.0, self.dt) #10000
-        lyaps_np_th=LE(f,initial_conditions,tspan)
+        f = jit_equation_0_3(alpha, A, C, E)
+        t_span = np.arange(self.t_i, self.t_f, self.dt)
+        lyaps_np_th=LE(f,self.initial_condition,t_span)
         KD(np.mean(lyaps_np_th[1000:,:],axis=0))
-        ts_np_th = plot_trajectory(f, y0=initial_conditions, t_span=(0,1000), dt=self.dt)
+        ts_np_th = plot_trajectory(f, initial_condition=self.initial_condition, t_span=(self.t_i,self.t_f), dt=self.dt)
         
 
 
