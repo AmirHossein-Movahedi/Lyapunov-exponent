@@ -17,7 +17,7 @@ class Lyapunov:
                 start_time:Union[float, None] = 0.001,
                 end_time:Union[float, None]= None,
                 dt:Union[float, None] = None,
-                initial_condition:Union[int, None] = None,
+                initial_condition:Union[NDArray, None] = None,
         ):
         """
             the necessary values for Lyapunov
@@ -244,7 +244,7 @@ class Lyapunov:
         coefficient = hints_calculator.get_coefficients()
         number_time_series = len(df_array[0])
 
-        alpha = np.asarray(coefficient.iloc[]) ################################# must be compelete
+        alpha = np.asarray(coefficient.iloc[0,:])
         A = np.asarray(coefficient.iloc[:number_time_series, :])
         C = np.asarray(coefficient.iloc[number_time_series:int((number_time_series*(number_time_series+1))/2)+number_time_series, :])
         E = np.asarray(coefficient.iloc[int((number_time_series*(number_time_series+1))/2)+number_time_series:, :])
