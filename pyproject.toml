@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lyapunov"
 version = "0.1.0"
-description = "Compute Lyapunov exponents and Kaplan–Yorke dimension from time series data using polynomial reconstruction."
-authors = [{ name = "Your Name", email = "your.email@example.com" }]
+description = "Compute Lyapunov exponents from time series data using polynomial reconstruction."
+authors = [{ name = "Amir Hossein Movahedi", email = "movahedi.amirhossien@gamil.com.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
-keywords = ["chaos", "lyapunov", "nonlinear", "jitcode", "dynamics", "physics"]
+keywords = ["time series","chaos", "lyapunov", "nonlinear", "jitcode", "dynamics", "physics"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -28,13 +28,6 @@ dependencies = [
     "jitcsde"
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest",
-    "flake8",
-    "black",
-    "mypy"
-]
 
 [tool.setuptools.packages.find]
 where = ["."]
