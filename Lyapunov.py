@@ -16,20 +16,24 @@ from numpy.typing import NDArray
 class Lyapunov:
 
     def __init__(self,
-                order: Union[int, None] = None,
+                start_time: Union[int, None] = 0,
+                end_time: Union[int, None]= None,
                 dt: Union[float, None] = None,
-                alpha: Union[float, None] = None,
-                A: Union[np.ndarray, None] = None,
-                B: Union[np.ndarray, None] = None,
-                C: Union[np.ndarray, None] = None,
+                order: Union[int, None] = None,
+                # alpha: Union[float, None] = None,
+                # A: Union[np.ndarray, None] = None,
+                # B: Union[np.ndarray, None] = None,
+                # C: Union[np.ndarray, None] = None,
         ):
         """
             explain the formula and the stochastic equation of that 
         """
-        if A is None and B is None and C is None :
-            raise ValueError("At least one of coefficient must be specified or get the path of dataset")
+        if end_time is None:
+            raise ValueError("Need the end time")
         elif dt is None:
             raise ValueError("the dt is needed")
+        elif order is None:
+            raise ValueError("order ne")
 
         self.alpaha = alpha
         self.A = A
