@@ -1,4 +1,3 @@
-# File: lyapunov/lyapunov.py
 """
 Lyapunov module suitable for packaging.
 
@@ -10,13 +9,9 @@ Functions:
  - LE : compute Lyapunov exponents via jitcode_lyap (wrap)
  - KD : Kaplan–Yorke dimension calculator
 
-Notes:
- - This module uses `jitcsde`, `jitcode` and `jitcode_lyap`. If those
-   packages are not installed the module raises an informative ImportError.
 """
 
 from __future__ import annotations
-
 from typing import Optional, Sequence, Tuple, List
 from collections import Counter
 from itertools import permutations, combinations_with_replacement
@@ -27,6 +22,13 @@ from numpy.typing import NDArray
 import pandas as pd
 from scipy.stats import sem
 import matplotlib.pyplot as plt
+
+"""
+Notes:
+ - This module uses `jitcsde`, `jitcode` and `jitcode_lyap`. If those
+   packages are not installed the module raises an informative ImportError.
+"""
+
 
 # Conditional imports for optional heavy dependencies
 try:
@@ -56,10 +58,10 @@ logger = logging.getLogger(__name__)
 class Lyapunov:
     """
     Container for constructing ODE systems from polynomial coefficients,
-    integrating them, computing Lyapunov exponents and Kaplan–Yorke dimension.
+    integrating them, computing Lyapunov exponents.
 
     Example:
-        L = Lyapunov(start_time=0.0, end_time=100.0, dt=0.01, initial_condition=np.array([0.1,0.2,0.3]))
+        L = Lyapunov(start_time=0.0001, end_time=100.0, dt=0.01, initial_condition=np.array([0.1,0.2,0.3]))
     """
 
     def __init__(
@@ -86,16 +88,6 @@ class Lyapunov:
     # -------------------------
     @staticmethod
     def build_tensor_3D(array: NDArray, number_time_series: int) -> NDArray:
-        """
-        Build symmetric 3D tensor B[i,j,m] from `array` having rows for unique pairs (i<=j).
-        Input:
-            array: shape (n_pairs, m) where n_pairs = n*(n+1)//2
-            number_time_series: n
-        Returns:
-            tensor_3D: shape (n, n, m) with symmetry B[i,j,:] == B[j,i,:]
-        Raises:
-            ValueError on bad shapes.
-        """
         arr = np.asarray(array)
         n = int(number_time_series)
         expected_rows = n * (n + 1) // 2
@@ -108,7 +100,6 @@ class Lyapunov:
 
         m = arr.shape[1]
         tensor = np.zeros((n, n, m), dtype=arr.dtype)
-        # lexicographic pairs (i <= j)
         idx = 0
         for i in range(n):
             for j in range(i, n):
@@ -119,26 +110,12 @@ class Lyapunov:
 
     @staticmethod
     def build_tensor_4D(array: NDArray, number_time_series: int) -> NDArray:
-        """
-        Build symmetric 4D tensor E[i,j,k,l] from `array` that lists unique
-        coefficient patterns for combinations with repetition of length 3
-        (i <= j <= k). The input rows correspond to those patterns.
-
-        Input:
-            array: shape (n_patterns, m?) OR (n_patterns,) depending on usage
-            number_time_series: n
-
-        Returns:
-            tensor_4D: shape (n, n, n, n) symmetric across permutations of indices.
-        """
         arr = np.asarray(array)
         n = int(number_time_series)
 
-        # patterns are combinations_with_replacement indices of length 3
         patterns = list(combinations_with_replacement(range(n), 3))
         expected_rows = len(patterns)
         if arr.ndim == 1:
-            # convert to shape (rows, 1)
             arr = arr.reshape((arr.shape[0], 1))
         if arr.ndim != 2:
             raise ValueError("array must be 1D or 2D (rows x m).")
@@ -149,31 +126,20 @@ class Lyapunov:
 
         m = arr.shape[1]
         tensor = np.zeros((n, n, n, n), dtype=arr.dtype)
-
-        # For each pattern (i,j,k) we will duplicate to 4 indices by duplicating
-        # the most common index (to mimic B -> E extension in user's original).
         for row_idx, (i, j, k) in enumerate(patterns):
-            values = arr[row_idx]  # shape (m,)
-            # expand to 4 indices by repeating the most common index
+            values = arr[row_idx] 
             counts = Counter((i, j, k))
             most_common_idx = counts.most_common(1)[0][0]
             full_indices = [i, j, k, most_common_idx]
 
             unique_perms = set(permutations(full_indices))
             multiplicity = len(unique_perms)
-
-            # distribute the coefficient values across all unique permutations evenly
             for perm in unique_perms:
-                # place the vector `values` into the tensor at perm
-                # if m == 1 treat as scalar
                 if m == 1:
                     val = float(values[0])
                     if val != 0.0:
                         tensor[perm] += val / multiplicity
                 else:
-                    # for vector-valued coefficients (e.g., time series), we place each element
-                    # across a 4D tensor of final shape (n,n,n,n,m) but original code
-                    # assumed scalar for E; here we sum scalars only
                     raise NotImplementedError(
                         "build_tensor_4D currently supports scalar coefficients per pattern (1 column)."
                     )
@@ -208,8 +174,6 @@ class Lyapunov:
             raise ValueError("alpha must have length n (A.shape[0])")
 
         eqs = []
-        # Expect C as (n, n, n) where C[i,j,k] multiplies y(j)*y(k)
-        # and E as (n,n,n,n) where E[i,j,k,l]*y(j)*y(k)*y(l)
         for i in range(n):
             # constant per-equation
             expr = float(alpha[i])
@@ -242,7 +206,7 @@ class Lyapunov:
         initial_condition: NDArray,
         t_span: Tuple[float, float],
         dt: float,
-    ) -> Tuple[NDArray, NDArray, plt.Figure, List[plt.Axes]]:
+    ):
         """
         Integrate `f` (list of jitcode expressions) with jitcode and produce trajectories.
 
@@ -387,13 +351,13 @@ class Lyapunov:
     def direct_method(self, path: str, order: int):
         """
         Read CSV time-series at `path`, compute coefficients using hints.kmcc,
-        build tensors and derive/plot trajectories and compute Lyapunov/KY.
+        build tensors and derive/plot trajectories and compute Lyapunov.
 
         This is a thin wrapper that imports `hints` lazily so the module can be imported
         without hints present.
         """
         try:
-            import hints  # type: ignore
+            import hints  
         except Exception as exc:
             raise RuntimeError(
                 "direct_method requires the external `hints` module (hints.kmcc)."
@@ -434,24 +398,4 @@ class Lyapunov:
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
         t_eval, y_result, fig, axs = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
         return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky, "fig": fig, "axs": axs}
-
-
-if __name__ == "__main__":
-    # Simple smoke tests for shape & basic validation (does not run jit integrations)
-    L = Lyapunov(start_time=0.0, end_time=1.0, dt=0.1, initial_condition=np.array([0.1, 0.2]))
-    # small sample for build_tensor_3D
-    n = 2
-    # For n=2, n_pairs = 3
-    sample = np.array([[1.0], [2.0], [3.0]])
-    t3 = Lyapunov.build_tensor_3D(sample, n)
-    assert t3.shape == (2, 2, 1)
-    print("build_tensor_3D smoke OK:", t3.shape)
-    # build_tensor_4D for n=2 -> combinations_with_replacement(range(2),3) => 4 patterns
-    e_rows = np.array([1.0, 0.0, 0.5, -0.25])
-    try:
-        t4 = Lyapunov.build_tensor_4D(e_rows, n)
-        assert t4.shape == (2, 2, 2, 2)
-        print("build_tensor_4D smoke OK:", t4.shape)
-    except NotImplementedError:
-        print("build_tensor_4D: vector-valued pattern not supported in this smoke test (scalar patterns worked).")
 
