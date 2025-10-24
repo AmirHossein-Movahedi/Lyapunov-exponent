@@ -393,6 +393,11 @@ class Lyapunov:
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
         t_eval, y_result = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        for i in range(number_time_series):
+            lyap = np.average(lyaps[1000:,i])
+            stderr = sem(lyaps[1000:,i])
+            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
+
         return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
 
     def data_methods(self, alpha: NDArray, A: NDArray, C: NDArray, E: NDArray):
@@ -404,6 +409,10 @@ class Lyapunov:
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
         t_eval, y_result = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        for i in range(len(self.initial_condition)):
+            lyap = np.average(lyaps[1000:,i])
+            stderr = sem(lyaps[1000:,i])
+            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
         return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
 
     def output_hints_method(self, df_array: NDArray):
@@ -425,4 +434,8 @@ class Lyapunov:
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
         t_eval, y_result, = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        for i in range(number_time_series):
+            lyap = np.average(lyaps[1000:,i])
+            stderr = sem(lyaps[1000:,i])
+            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
         return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
