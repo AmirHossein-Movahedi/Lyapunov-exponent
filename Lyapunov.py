@@ -48,12 +48,12 @@ except Exception:
 # Attempt to import user-provided helper module 'hints' at runtime in methods that need it.
 # Do not import here to allow package tests when hints isn't present.
 
-__all__ = ["Lyapunov"]
+__all__ = ["lyapunov"]
 
 logger = logging.getLogger(__name__)
 
 
-class Lyapunov:
+class lyapunov:
     """
     Container for constructing ODE systems from polynomial coefficients,
     integrating them, computing Lyapunov exponents and Kaplan–Yorke dimension.
