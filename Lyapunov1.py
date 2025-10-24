@@ -108,42 +108,37 @@ class Lyapunov:
                 idx += 1
         return tensor
 
+
     @staticmethod
     def build_tensor_4D(array: NDArray, number_time_series: int) -> NDArray:
         arr = np.asarray(array)
         n = int(number_time_series)
-
         patterns = list(combinations_with_replacement(range(n), 3))
         expected_rows = len(patterns)
+
         if arr.ndim == 1:
             arr = arr.reshape((arr.shape[0], 1))
-        if arr.ndim != 2:
-            raise ValueError("array must be 1D or 2D (rows x m).")
         if arr.shape[0] != expected_rows:
-            raise ValueError(
-                f"array has {arr.shape[0]} rows but expected {expected_rows} for n={n}."
-            )
+            raise ValueError(f"array has {arr.shape[0]} rows but expected {expected_rows} for n={n}.")
 
         m = arr.shape[1]
-        tensor = np.zeros((n, n, n, n), dtype=arr.dtype)
+        tensor = np.zeros((m, n, n, n, n), dtype=arr.dtype)  # one 4D tensor per column
+
         for row_idx, (i, j, k) in enumerate(patterns):
-            values = arr[row_idx] 
             counts = Counter((i, j, k))
             most_common_idx = counts.most_common(1)[0][0]
             full_indices = [i, j, k, most_common_idx]
-
             unique_perms = set(permutations(full_indices))
             multiplicity = len(unique_perms)
-            for perm in unique_perms:
-                if m == 1:
-                    val = float(values[0])
-                    if val != 0.0:
-                        tensor[perm] += val / multiplicity
-                else:
-                    raise NotImplementedError(
-                        "build_tensor_4D currently supports scalar coefficients per pattern (1 column)."
-                    )
-        return tensor
+
+            for col in range(m):
+                val = float(arr[row_idx, col])
+                if val != 0.0:
+                    for perm in unique_perms:
+                        tensor[col, perm[0], perm[1], perm[2], perm[3]] += val / multiplicity
+
+        return tensor  # shape: (m, n, n, n, n)
+
 
     # -------------------------
     # Construct JIT expressions
@@ -192,8 +187,14 @@ class Lyapunov:
 
             # cubic terms from E
             if E is not None and E.size != 0:
-                expr = expr + sum(float(E[i, j, k, l]) * y(j) * y(k) * y(l)
-                                  for j in range(n) for k in range(n) for l in range(n))
+                for j in range(n):
+                    for k in range(n):
+                        for l in range(n):
+                            val = E[i, j, k, l]
+                            if np.ndim(val) > 0:  # if it's a small array
+                                val = val.item() if val.size == 1 else float(np.mean(val))
+                            expr += float(val) * y(j) * y(k) * y(l)
+
             eqs.append(expr)
         return eqs
 
@@ -266,7 +267,9 @@ class Lyapunov:
             ax.legend()
             axs.append(ax)
 
-        return t_eval, y_result, fig, axs
+        fig.savefig("./out.png")
+
+        return t_eval, y_result
 
     # -------------------------
     # Lyapunov exponents via jitcode_lyap wrapper
@@ -275,9 +278,8 @@ class Lyapunov:
     def LE(f: Sequence, initial_condition: NDArray, t_span: NDArray) -> NDArray:
         """
         Compute Lyapunov exponents using jitcode_lyap wrapper.
-
         Returns:
-            lyaps: array shape (len(t_span), n) where n = len(f)
+            lyaps: array shape (len(t_span), n)
         """
         if jitcode_lyap is None:
             raise RuntimeError("jitcode_lyap is required for LE (install jitcode).")
@@ -288,20 +290,25 @@ class Lyapunov:
         ODE.set_initial_value(np.asarray(initial_condition, dtype=float), float(t_span[0]))
 
         lyaps_list = []
+
         for tt in t_span:
             out = ODE.integrate(tt)
-            # jitcode_lyap usually returns extended state: [y..., lyap1, lyap2, ...]
-            # Many implementations put Lyapunov exponents at the end; here we assume index 1..n
-            # But to be robust we attempt to slice last n entries if out is 1D > n
-            out = np.asarray(out, dtype=float).flatten()
-            if out.size >= n:
-                # try to obtain lyap part: choose last n elements
-                lyap_part = out[-n:]
+
+            # handle tuple or nested structure
+            if isinstance(out, (tuple, list)):
+                out = np.concatenate([np.ravel(np.asarray(o, dtype=float)) for o in out])
             else:
-                raise RuntimeError("Unexpected output shape from jitcode_lyap integrate.")
+                out = np.ravel(np.asarray(out, dtype=float))
+
+            # sanity check
+            if out.size < n:
+                raise RuntimeError(f"Unexpected output shape {out.shape} from jitcode_lyap integrate.")
+
+            lyap_part = out[-n:]
             lyaps_list.append(lyap_part)
 
         return np.vstack(lyaps_list)
+
 
     # -------------------------
     # Kaplan–Yorke / KY dimension
@@ -385,8 +392,8 @@ class Lyapunov:
         t_span = np.arange(self.t_i, self.t_f, self.dt)
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
-        t_eval, y_result, fig, axs = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
-        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky, "fig": fig, "axs": axs}
+        t_eval, y_result = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
 
     def data_methods(self, alpha: NDArray, A: NDArray, C: NDArray, E: NDArray):
         """
@@ -396,6 +403,26 @@ class Lyapunov:
         t_span = np.arange(self.t_i, self.t_f, self.dt)
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
-        t_eval, y_result, fig, axs = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
-        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky, "fig": fig, "axs": axs}
+        t_eval, y_result = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
 
+    def output_hints_method(self, df_array: NDArray):
+
+        number_time_series = df_array.shape[1]
+        coefficient = pd.DataFrame(df_array)
+        alpha = np.asarray(coefficient.iloc[0, :])
+        # linear block
+        A = np.asarray(coefficient.iloc[1:number_time_series + 1, :])
+        # quadratic rows: next n*(n+1)//2 rows
+        q_start = 1 + number_time_series
+        q_end = q_start + (number_time_series * (number_time_series + 1)) // 2
+        C_rows = np.asarray(coefficient.iloc[q_start:q_end, :])
+        e_rows = np.asarray(coefficient.iloc[q_end:, :])
+        C = self.build_tensor_3D(C_rows, number_time_series)
+        E = self.build_tensor_4D(e_rows, number_time_series)
+        f = self.jit_equation_0_3(alpha, A, C, E)
+        t_span = np.arange(self.t_i, self.t_f, self.dt)
+        lyaps = self.LE(f, self.initial_condition, t_span)
+        ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
+        t_eval, y_result, = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
