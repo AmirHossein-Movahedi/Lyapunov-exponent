@@ -3,12 +3,10 @@ Lyapunov module suitable for packaging.
 
 Primary class: Lyapunov
 Functions:
- - build_tensor_3D, build_tensor_4D : build symmetric coefficient tensors
- - jit_equation_0_3 : compose RHS expressions for jitcode / jitcsde
+ - jit_equation: compose RHS expressions for jitcode / jitcsde
  - plot_trajectory : integrate and return trajectories + Matplotlib figures
  - LE : compute Lyapunov exponents via jitcode_lyap (wrap)
  - KD : Kaplan–Yorke dimension calculator
-
 """
 
 from __future__ import annotations
@@ -51,7 +49,6 @@ except Exception:
 # Do not import here to allow package tests when hints isn't present.
 
 __all__ = ["Lyapunov"]
-
 logger = logging.getLogger(__name__)
 
 
@@ -83,81 +80,21 @@ class Lyapunov:
         self.dt = float(dt)
         self.initial_condition = np.asarray(initial_condition, dtype=float).copy()
 
-    # -------------------------
-    # Tensor builders
-    # -------------------------
-    @staticmethod
-    def build_tensor_3D(array: NDArray, number_time_series: int) -> NDArray:
-        arr = np.asarray(array)
-        n = int(number_time_series)
-        expected_rows = n * (n + 1) // 2
-        if arr.ndim != 2:
-            raise ValueError("array must be 2D with shape (n_pairs, m).")
-        if arr.shape[0] != expected_rows:
-            raise ValueError(
-                f"array has {arr.shape[0]} rows but expected {expected_rows} for n={n}."
-            )
 
-        m = arr.shape[1]
-        tensor = np.zeros((n, n, m), dtype=arr.dtype)
-        idx = 0
-        for i in range(n):
-            for j in range(i, n):
-                tensor[i, j, :] = arr[idx]
-                tensor[j, i, :] = arr[idx]
-                idx += 1
-        return tensor
-
-
-    @staticmethod
-    def build_tensor_4D(array: NDArray, number_time_series: int) -> NDArray:
-        arr = np.asarray(array)
-        n = int(number_time_series)
-        patterns = list(combinations_with_replacement(range(n), 3))
-        expected_rows = len(patterns)
-
-        if arr.ndim == 1:
-            arr = arr.reshape((arr.shape[0], 1))
-        if arr.shape[0] != expected_rows:
-            raise ValueError(f"array has {arr.shape[0]} rows but expected {expected_rows} for n={n}.")
-
-        m = arr.shape[1]
-        tensor = np.zeros((m, n, n, n, n), dtype=arr.dtype)  # one 4D tensor per column
-
-        for row_idx, (i, j, k) in enumerate(patterns):
-            counts = Counter((i, j, k))
-            most_common_idx = counts.most_common(1)[0][0]
-            full_indices = [i, j, k, most_common_idx]
-            unique_perms = set(permutations(full_indices))
-            multiplicity = len(unique_perms)
-
-            for col in range(m):
-                val = float(arr[row_idx, col])
-                if val != 0.0:
-                    for perm in unique_perms:
-                        tensor[col, perm[0], perm[1], perm[2], perm[3]] += val / multiplicity
-
-        return tensor  # shape: (m, n, n, n, n)
-
-
-    # -------------------------
     # Construct JIT expressions
     # -------------------------
     @staticmethod
-    def jit_equation_0_3(
+    def jit_equation(
         alpha: NDArray, A: NDArray, C: NDArray, E: NDArray
     ) -> List:
         """
         Create list of expressions for JIT integrators (jitcode / jitcsde).
-
         alpha: 1D shape (n,) constants per equation
         A: 2D shape (n, n) linear terms
-        C: 3D shape (n, n, ?) expects C[i,j,k] where k maps to state index OR
-           if C is shape (n,n,n) treat as quadratic coefficients over state indices.
-        E: 4D shape (n,n,n,n)
-
+        C: 3D shape (n, n, n), C[i,(j,k)] quadratic terms 
+        E: 4D shape (n,n,n,n), E[i,(j,k,l)] Cubic term
         Returns:
-            list of expressions (one per equation) using `y(j)` references for jitcode.
+            list of expressions
         """
         alpha = np.asarray(alpha)
         A = np.asarray(A)
@@ -170,35 +107,33 @@ class Lyapunov:
 
         eqs = []
         for i in range(n):
-            # constant per-equation
-            expr = float(alpha[i])
-            # linear terms
-            expr = expr + sum(float(A[i, j]) * y(j) for j in range(n))
-            # quadratic terms
-            if C.ndim == 3 and C.shape[0] == n:
-                expr = expr + sum(float(C[i, j, k]) * y(j) * y(k) for j in range(n) for k in range(n))
-            elif C.ndim == 4 and C.shape[0] == n:
-                # if provided full 4D, fallback (rare)
-                expr = expr + sum(float(C[i, j, k, l]) * y(j) * y(k) * y(l)
-                                  for j in range(n) for k in range(n) for l in range(n))
-            else:
-                # assume C provided in the form (n,n) zero-case
-                pass
+            # Build up the i-th equation
+            # Linear term
+            Linear_term =  []
+            for j in range(n):
+                Linear_term.append(A[j, i] * y(j))
+            
+            # Quadratic term, summing only for j <= k to avoid duplicates
+            Quadratic_term = []
+            index = 0
+            for j in range(n):
+                for k in range(j, n):
+                    Quadratic_term.append(C[index, i] * y(j) * y(k))
+                    index += 1
 
-            # cubic terms from E
-            if E is not None and E.size != 0:
-                for j in range(n):
-                    for k in range(n):
-                        for l in range(n):
-                            val = E[i, j, k, l]
-                            if np.ndim(val) > 0:  # if it's a small array
-                                val = val.item() if val.size == 1 else float(np.mean(val))
-                            expr += float(val) * y(j) * y(k) * y(l)
-
-            eqs.append(expr)
+            # Cubic term, summing only for j <= k <= l
+            Cubic_term = []
+            index = 0 
+            for j in range(n):
+                for k in range(j, n):
+                    for l in range(k, n):
+                        Quadratic_term.append(E[index, i] * y(j) * y(k) * y(l))
+                        index += 1
+            expression = alpha[i] + sum(Linear_term) + sum(Quadratic_term) + sum(Cubic_term)
+            eqs.append(expression)
         return eqs
+    
 
-    # -------------------------
     # Plotting / trajectory
     # -------------------------
     @staticmethod
@@ -212,7 +147,7 @@ class Lyapunov:
         Integrate `f` (list of jitcode expressions) with jitcode and produce trajectories.
 
         Returns:
-            t_eval, y_result, fig, axs
+            t_eval, y_result, save figure
         """
         if jitcode is None:
             raise RuntimeError("jitcode is required for plot_trajectory (install jitcode).")
@@ -226,7 +161,7 @@ class Lyapunov:
 
         for idx, tt in enumerate(t_eval):
             y_result[idx] = ode.integrate(tt)
-
+        ################################# below must be checked
         # build plot(s)
         fig = plt.figure(constrained_layout=True, figsize=(10, 5))
         axs = []
@@ -267,11 +202,10 @@ class Lyapunov:
             ax.legend()
             axs.append(ax)
 
-        fig.savefig("./out.png")
+        fig.savefig("./out.jpg")
 
         return t_eval, y_result
 
-    # -------------------------
     # Lyapunov exponents via jitcode_lyap wrapper
     # -------------------------
     @staticmethod
@@ -293,24 +227,27 @@ class Lyapunov:
 
         for tt in t_span:
             out = ODE.integrate(tt)
+            lyaps_list.append(out[1])
+            # # handle tuple or nested structure
+            # if isinstance(out, (tuple, list)):
+            #     out = np.concatenate([np.ravel(np.asarray(o, dtype=float)) for o in out])
+            # else:
+            #     out = np.ravel(np.asarray(out, dtype=float))
 
-            # handle tuple or nested structure
-            if isinstance(out, (tuple, list)):
-                out = np.concatenate([np.ravel(np.asarray(o, dtype=float)) for o in out])
-            else:
-                out = np.ravel(np.asarray(out, dtype=float))
+            # # sanity check
+            # if out.size < n:
+            #     raise RuntimeError(f"Unexpected output shape {out.shape} from jitcode_lyap integrate.")
 
-            # sanity check
-            if out.size < n:
-                raise RuntimeError(f"Unexpected output shape {out.shape} from jitcode_lyap integrate.")
-
-            lyap_part = out[-n:]
-            lyaps_list.append(lyap_part)
-
-        return np.vstack(lyaps_list)
+            # lyap_part = out[-n:]
+            # lyaps_list.append(lyap_part)
+        lyaps = np.vstack(lyaps_list)
+        for i in range(n):
+            lyap = np.average(lyaps[1000:,i])
+            stderr = sem(lyaps[1000:, i])
+            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
+        return lyaps
 
 
-    # -------------------------
     # Kaplan–Yorke / KY dimension
     # -------------------------
     @staticmethod
@@ -321,7 +258,8 @@ class Lyapunov:
         Returns:
             D: float or None if undefined.
         """
-        arr = np.asarray(lyaps, dtype=float).flatten()
+        # arr = np.asarray(lyaps, dtype=float).flatten()
+        arr = np.round(lyaps, 2)
         # sort descending
         arr_sorted = np.sort(arr)[::-1]
 
@@ -339,26 +277,28 @@ class Lyapunov:
             s += lam
             if s >= 0:
                 j = idx + 1
+        #     else:
+        #         # cumulative sum crossed negative at this lam, compute D using previous partial sum
+        #         if idx == 0:
+        #             return 0.0
+        #         sum_pos = np.sum(arr_sorted[:j])
+        #         if j < len(arr_sorted):
+        #             lam_next = arr_sorted[j]
+        #             D = j + sum_pos / abs(lam_next) if lam_next != 0 else float(j)
+        #             return float(D)
+        #         return float(j)
+        # # if loop completes, all cumulative sums >= 0
+        # return float(j)
             else:
-                # cumulative sum crossed negative at this lam, compute D using previous partial sum
-                if idx == 0:
-                    return 0.0
-                sum_pos = np.sum(arr_sorted[:j])
-                if j < len(arr_sorted):
-                    lam_next = arr_sorted[j]
-                    D = j + sum_pos / abs(lam_next) if lam_next != 0 else float(j)
-                    return float(D)
-                return float(j)
-        # if loop completes, all cumulative sums >= 0
-        return float(j)
+                break
+        D = j + np.sum(arr_sorted[:j])/np.abs(arr_sorted[j])
+        return D.tolist()
 
-    # -------------------------
-    # High-level convenience methods
-    # -------------------------
+
     def direct_method(self, path: str, order: int):
         """
         Read CSV time-series at `path`, compute coefficients using hints.kmcc,
-        build tensors and derive/plot trajectories and compute Lyapunov.
+        derive/plot trajectories and compute Lyapunov.
 
         This is a thin wrapper that imports `hints` lazily so the module can be imported
         without hints present.
@@ -382,13 +322,10 @@ class Lyapunov:
         # quadratic rows: next n*(n+1)//2 rows
         q_start = 1 + number_time_series
         q_end = q_start + (number_time_series * (number_time_series + 1)) // 2
-        C_rows = np.asarray(coefficient.iloc[q_start:q_end, :])
-        e_rows = np.asarray(coefficient.iloc[q_end:, :])
+        C = np.asarray(coefficient.iloc[q_start:q_end, :])
+        E = np.asarray(coefficient.iloc[q_end:, :])
 
-        C = self.build_tensor_3D(C_rows, number_time_series)
-        E = self.build_tensor_4D(e_rows, number_time_series)
-
-        f = self.jit_equation_0_3(alpha, A, C, E)
+        f = self.jit_equation(alpha, A, C, E)
         t_span = np.arange(self.t_i, self.t_f, self.dt)
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
@@ -398,21 +335,6 @@ class Lyapunov:
             stderr = sem(lyaps[1000:,i])
             print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
 
-        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
-
-    def data_methods(self, alpha: NDArray, A: NDArray, C: NDArray, E: NDArray):
-        """
-        Use provided coefficient arrays directly (alpha, A, C, E) to run LE, KD and trajectory.
-        """
-        f = self.jit_equation_0_3(alpha, A, C, E)
-        t_span = np.arange(self.t_i, self.t_f, self.dt)
-        lyaps = self.LE(f, self.initial_condition, t_span)
-        ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
-        t_eval, y_result = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
-        for i in range(len(self.initial_condition)):
-            lyap = np.average(lyaps[1000:,i])
-            stderr = sem(lyaps[1000:,i])
-            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
         return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
 
     def output_hints_method(self, df_array: NDArray):
@@ -425,11 +347,10 @@ class Lyapunov:
         # quadratic rows: next n*(n+1)//2 rows
         q_start = 1 + number_time_series
         q_end = q_start + (number_time_series * (number_time_series + 1)) // 2
-        C_rows = np.asarray(coefficient.iloc[q_start:q_end, :])
-        e_rows = np.asarray(coefficient.iloc[q_end:, :])
-        C = self.build_tensor_3D(C_rows, number_time_series)
-        E = self.build_tensor_4D(e_rows, number_time_series)
-        f = self.jit_equation_0_3(alpha, A, C, E)
+        C = np.asarray(coefficient.iloc[q_start:q_end, :])
+        E = np.asarray(coefficient.iloc[q_end:, :])
+    
+        f = self.jit_equation(alpha, A, C, E)
         t_span = np.arange(self.t_i, self.t_f, self.dt)
         lyaps = self.LE(f, self.initial_condition, t_span)
         ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
