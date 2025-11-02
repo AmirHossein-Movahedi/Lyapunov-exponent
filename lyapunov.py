@@ -1,277 +1,362 @@
-from typing import Union
+"""
+Lyapunov module suitable for packaging.
+
+Primary class: Lyapunov
+Functions:
+ - jit_equation: compose RHS expressions for jitcode / jitcsde
+ - plot_trajectory : integrate and return trajectories + Matplotlib figures
+ - LE : compute Lyapunov exponents via jitcode_lyap (wrap)
+ - KD : Kaplan–Yorke dimension calculator
+"""
+
+from __future__ import annotations
+from typing import Optional, Sequence, Tuple, List
 from collections import Counter
-from itertools import permutations
+from itertools import permutations, combinations_with_replacement
+import logging
+
 import numpy as np
-import pandas as pd
-import hints 
-from jitcsde import jitcsde, y, t
-from jitcode import jitcode_lyap, y, jitcode
-import matplotlib.pyplot as plt
-from scipy.stats import sem
 from numpy.typing import NDArray
+import pandas as pd
+from scipy.stats import sem
+import matplotlib.pyplot as plt
+
+"""
+Notes:
+ - This module uses `jitcsde`, `jitcode` and `jitcode_lyap`. If those
+   packages are not installed the module raises an informative ImportError.
+"""
 
 
-class lyapunov:
+# Conditional imports for optional heavy dependencies
+try:
+    from jitcsde import jitcsde, y, t  # optional; needed for DDE-style systems
+except Exception:
+    jitcsde = None
+    y = None
+    t = None
 
-    def __init__(self,
-                start_time:Union[float, None] = 0.001,
-                end_time:Union[float, None]= None,
-                dt:Union[float, None] = None,
-                initial_condition:Union[NDArray, None] = None,
-        ):
-        """
-            the necessary values for Lyapunov
-        """
+try:
+    from jitcode import jitcode_lyap, y as _y_jc, jitcode
+    # prefer jitcode's `y` if jitcsde isn't installed
+    if y is None:
+        y = _y_jc
+except Exception:
+    jitcode_lyap = None
+    jitcode = None
+
+# Attempt to import user-provided helper module 'hints' at runtime in methods that need it.
+# Do not import here to allow package tests when hints isn't present.
+
+__all__ = ["Lyapunov"]
+logger = logging.getLogger(__name__)
+
+
+class Lyapunov:
+    """
+    Container for constructing ODE systems from polynomial coefficients,
+    integrating them, computing Lyapunov exponents.
+
+    Example:
+        L = Lyapunov(start_time=0.0001, end_time=100.0, dt=0.01, initial_condition=np.array([0.1,0.2,0.3]))
+    """
+
+    def __init__(
+        self,
+        start_time: Optional[float] = 0.001,
+        end_time: Optional[float] = None,
+        dt: Optional[float] = None,
+        initial_condition: Optional[NDArray] = None,
+    ) -> None:
         if end_time is None:
-            raise ValueError("Need the end time")
-        elif dt is None:
-            raise ValueError("the dt is needed")
-        elif initial_condition is None:
-            raise ValueError("order needed")
+            raise ValueError("end_time must be provided.")
+        if dt is None:
+            raise ValueError("dt must be provided.")
+        if initial_condition is None:
+            raise ValueError("initial_condition must be provided.")
 
-        self.t_i = start_time
-        self.t_f = end_time
-        self.dt = dt
-        self.initial_condition = initial_condition
-    
-    
+        self.t_i = float(start_time or 0.0)
+        self.t_f = float(end_time)
+        self.dt = float(dt)
+        self.initial_condition = np.asarray(initial_condition, dtype=float).copy()
+
+
+    # Construct JIT expressions
+    # -------------------------
     @staticmethod
-    def build_tensor_3D(array:NDArray, number_time_series:int):
-        array = np.asarray(array)
-        num_pairs_expected = number_time_series * (number_time_series + 1) // 2
-
-        if array.ndim != 2:
-            raise ValueError("rows_array must be 2D with shape (num_pairs, m).")
-        if array.shape[0] != num_pairs_expected:
-            raise ValueError(f"rows_array has {array.shape[0]} rows but expected {num_pairs_expected} for n={number_time_series}.")
-        
-        m = array.shape[1]
-        # generate pairs in lexicographic order (i <= j)
-        pairs = [(i, j) for i in range(number_time_series) for j in range(i, number_time_series)]
-
-        tensor_3D = np.zeros((number_time_series, number_time_series, m), dtype=array.dtype)
-
-        for (i, j), values in zip(pairs, array):
-            tensor_3D[i, j, :] = values
-            tensor_3D[j, i, :] = values
-
-        return tensor_3D
-    
-
-    @staticmethod
-    def build_tensor_4D(array:NDArray, number_time_series:int):
-        array = np.asarray(array)
-        tensor_4D = np.zeros((number_time_series, number_time_series, number_time_series, number_time_series))
-        
-        # generate all index patterns of length 3 with non-decreasing order
-        # e.g., for n=4 → (0,0,0), (0,0,1), ..., (3,3,3)
-        patterns = []
-        for i in range(number_time_series):
-            for j in range(i, number_time_series):
-                for k in range(j, number_time_series):
-                    patterns.append((i, j, k))
-        
-        # Now each row of matrix_array corresponds to one of these patterns
-        for row_idx, indices in enumerate(patterns):
-            values = array[row_idx]
-            
-            # Build full 4 indices by duplicating one index
-            # (so pattern length 3 → tensor rank 4)
-            counter = Counter(indices)
-            full_indices = []
-            for idx, count in counter.items():
-                full_indices.extend([idx] * count)
-            
-            if len(full_indices) == 3:  # pad to 4
-                most_common = counter.most_common(1)[0][0]
-                full_indices.append(most_common)
-            
-            # Generate all unique permutations
-            unique_perms = set(permutations(full_indices))
-            multiplicity = len(unique_perms)
-            
-            for val in values:
-                if val != 0:
-                    for perm in unique_perms:
-                        tensor_4D[perm] += val / multiplicity
-        
-        return tensor_4D
-    
-
-    @staticmethod
-    def jit_equation_0_3(alpha:NDArray, A:NDArray, C:NDArray, E:NDArray):
+    def jit_equation(
+        alpha: NDArray, A: NDArray, C: NDArray, E: NDArray
+    ) -> List:
         """
-        Constructs the derivatives ẋ_i(t) for a system, including:
-        Const[i]        : constant offsets
-        A[i,j]*y(j)     : linear terms
-        B[i,j,k]*y(j)*y(k)  : quadratic terms
-        E[i,j,k,l]*y(j)*y(k)*y(l) : cubic terms
-
-        Parameters
-        ----------
-        Const : array_like
-            1D array of shape (n,), the constant offsets.
-        A : array_like
-            2D array of shape (n, n), the linear coefficients.
-        B : array_like
-            3D array of shape (n, n, n), the quadratic coefficients.
-        E : array_like
-            4D array of shape (n, n, n, n), the cubic coefficients.
-    
-        Returns
-        -------
-        eq : list
-            A list of symbolic expressions suitable for JIT compilation with jitcsde.
+        Create list of expressions for JIT integrators (jitcode / jitcsde).
+        alpha: 1D shape (n,) constants per equation
+        A: 2D shape (n, n) linear terms
+        C: 3D shape (n, n, n), C[i,(j,k)] quadratic terms 
+        E: 4D shape (n,n,n,n), E[i,(j,k,l)] Cubic term
+        Returns:
+            list of expressions
         """
-        # Convert all inputs to numpy asarray
         alpha = np.asarray(alpha)
         A = np.asarray(A)
         C = np.asarray(C)
         E = np.asarray(E)
-        
-        n = A.shape[0]
-        eq = []
+
+        n = int(A.shape[0])
+        if alpha.shape[0] != n:
+            raise ValueError("alpha must have length n (A.shape[0])")
+
+        eqs = []
         for i in range(n):
             # Build up the i-th equation
-            expression = (
-                alpha                                                   # constant term
-                + sum(A[i, j] * y(j) for j in range(n))                 # Linear term
-                # Quadratic term, summing only for j <= k to avoid duplicates
-                + sum(C[i, j, k] * y(j) * y(k) 
-                    for j in range(n) 
-                    for k in range(j, n))
-                # Cubic term, summing only for j <= k <= l
-                + sum(E[i, j, k, l] * y(j) * y(k) * y(l)
-                    for j in range(n) 
-                    for k in range(j, n) 
-                    for l in range(k, n))
-            )
-            eq.append(expression)
-        return eq
+            # Linear term
+            Linear_term =  []
+            for j in range(n):
+                Linear_term.append(A[j, i] * y(j))
+            
+            # Quadratic term, summing only for j <= k to avoid duplicates
+            Quadratic_term = []
+            index = 0
+            for j in range(n):
+                for k in range(j, n):
+                    Quadratic_term.append(C[index, i] * y(j) * y(k))
+                    index += 1
+
+            # Cubic term, summing only for j <= k <= l
+            Cubic_term = []
+            index = 0 
+            for j in range(n):
+                for k in range(j, n):
+                    for l in range(k, n):
+                        Quadratic_term.append(E[index, i] * y(j) * y(k) * y(l))
+                        index += 1
+            expression = alpha[i] + sum(Linear_term) + sum(Quadratic_term) + sum(Cubic_term)
+            eqs.append(expression)
+        return eqs
     
 
-    ################################### PLOT ########################################
+    # Plotting / trajectory
+    # -------------------------
     @staticmethod
-    def plot_trajectory(f, initial_condition, t_span, dt):
-        # Initialize the JIT-compiled ODE system
+    def plot_trajectory(
+        f: Sequence,
+        initial_condition: NDArray,
+        t_span: Tuple[float, float],
+        dt: float,
+    ):
+        """
+        Integrate `f` (list of jitcode expressions) with jitcode and produce trajectories.
+
+        Returns:
+            t_eval, y_result, save figure
+        """
+        if jitcode is None:
+            raise RuntimeError("jitcode is required for plot_trajectory (install jitcode).")
+
         ode = jitcode(f)
         ode.set_integrator("dopri5")
-        ode.set_initial_value(initial_condition, t_span[0])
+        ode.set_initial_value(np.asarray(initial_condition, dtype=float), float(t_span[0]))
 
-        # Create time evaluation points
-        t_eval = np.arange(t_span[0], t_span[1], dt)
-        y_result = np.empty((len(t_eval), len(initial_condition)))
+        t_eval = np.arange(t_span[0], t_span[1], dt, dtype=float)
+        y_result = np.empty((len(t_eval), len(initial_condition)), dtype=float)
 
-        # Integrate the system
-        for i, t in enumerate(t_eval):
-            y_result[i] = ode.integrate(t)
+        for idx, tt in enumerate(t_eval):
+            y_result[idx] = ode.integrate(tt)
+        ################################# below must be checked
+        # build plot(s)
+        fig = plt.figure(constrained_layout=True, figsize=(10, 5))
+        axs = []
 
-        # Plot the trajectory
-        if len(initial_condition) == 2:
-            plt.plot(y_result[:, 0], y_result[:, 1], lw=0.5)
-            plt.xlabel('y0')
-            plt.ylabel('y1')
-            plt.title('Phase Space Trajectory')
-            plt.figure(figsize=(15,5))
-            plt.plot(t_eval, y_result[:, 0], label='y0')
-            plt.plot(t_eval, y_result[:, 1], label='y1')
-        elif len(initial_condition) == 3:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection='3d')
-            ax.plot(y_result[:, 0], y_result[:, 1], y_result[:, 2], lw=0.5)
-            ax.set_xlabel('y0')
-            ax.set_ylabel('y1')
-            ax.set_zlabel('y2')
-            ax.set_title('3D Phase Space Trajectory')
-            plt.figure(figsize=(15, 5))
-            plt.plot(t_eval, y_result[:, 0], label='y0')
-            plt.plot(t_eval, y_result[:, 1], label='y1')
-            plt.plot(t_eval, y_result[:, 2], label='y2')
-        elif len(initial_condition) > 3:
-            for i in range(len(initial_condition)):
-                plt.figure(figsize=(10, 3))
-                plt.plot(t_eval, y_result[:, i], label=f'y{i}')
-        return y_result
+        dim = len(initial_condition)
+        if dim == 2:
+            ax = fig.add_subplot(1, 2, 1)
+            ax.plot(y_result[:, 0], y_result[:, 1], lw=0.7)
+            ax.set_xlabel("y0")
+            ax.set_ylabel("y1")
+            ax.set_title("Phase Space")
+            axs.append(ax)
 
+            ax2 = fig.add_subplot(1, 2, 2)
+            ax2.plot(t_eval, y_result[:, 0], label="y0")
+            ax2.plot(t_eval, y_result[:, 1], label="y1")
+            ax2.legend()
+            axs.append(ax2)
+        elif dim == 3:
+            from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+            ax = fig.add_subplot(1, 2, 1, projection="3d")
+            ax.plot(y_result[:, 0], y_result[:, 1], y_result[:, 2], lw=0.7)
+            ax.set_xlabel("y0")
+            ax.set_ylabel("y1")
+            ax.set_zlabel("y2")
+            axs.append(ax)
 
+            ax2 = fig.add_subplot(1, 2, 2)
+            ax2.plot(t_eval, y_result[:, 0], label="y0")
+            ax2.plot(t_eval, y_result[:, 1], label="y1")
+            ax2.plot(t_eval, y_result[:, 2], label="y2")
+            ax2.legend()
+            axs.append(ax2)
+        else:
+            ax = fig.add_subplot(1, 1, 1)
+            for i in range(dim):
+                ax.plot(t_eval, y_result[:, i], label=f"y{i}")
+            ax.legend()
+            axs.append(ax)
+
+        fig.savefig("./out.jpg")
+
+        return t_eval, y_result
+
+    # Lyapunov exponents via jitcode_lyap wrapper
+    # -------------------------
     @staticmethod
-    def LE(f,initial_condition,t_span):
+    def LE(f: Sequence, initial_condition: NDArray, t_span: NDArray) -> NDArray:
+        """
+        Compute Lyapunov exponents using jitcode_lyap wrapper.
+        Returns:
+            lyaps: array shape (len(t_span), n)
+        """
+        if jitcode_lyap is None:
+            raise RuntimeError("jitcode_lyap is required for LE (install jitcode).")
+
         n = len(f)
         ODE = jitcode_lyap(f, n_lyap=n)
         ODE.set_integrator("dopri5")
-        ODE.set_initial_value(initial_condition,0.0)
+        ODE.set_initial_value(np.asarray(initial_condition, dtype=float), float(t_span[0]))
 
-        lyaps = []
-        for time in t_span:
-            lyaps.append(ODE.integrate(time)[1])
+        lyaps_list = []
 
-        # converting to NumPy array for easier handling
-        lyaps = np.vstack(lyaps)
+        for tt in t_span:
+            out = ODE.integrate(tt)
+            lyaps_list.append(out[1])
+            # # handle tuple or nested structure
+            # if isinstance(out, (tuple, list)):
+            #     out = np.concatenate([np.ravel(np.asarray(o, dtype=float)) for o in out])
+            # else:
+            #     out = np.ravel(np.asarray(out, dtype=float))
 
+            # # sanity check
+            # if out.size < n:
+            #     raise RuntimeError(f"Unexpected output shape {out.shape} from jitcode_lyap integrate.")
+
+            # lyap_part = out[-n:]
+            # lyaps_list.append(lyap_part)
+        lyaps = np.vstack(lyaps_list)
         for i in range(n):
+            lyap = np.average(lyaps[1000:,i])
+            stderr = sem(lyaps[1000:, i])
+            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
+        return lyaps
+
+
+    # Kaplan–Yorke / KY dimension
+    # -------------------------
+    @staticmethod
+    def KD(lyaps: NDArray) -> Optional[float]:
+        """
+        Compute Kaplan–Yorke dimension from a 1D array of Lyapunov exponents (sorted descending).
+
+        Returns:
+            D: float or None if undefined.
+        """
+        # arr = np.asarray(lyaps, dtype=float).flatten()
+        arr = np.round(lyaps, 2)
+        # sort descending
+        arr_sorted = np.sort(arr)[::-1]
+
+        # If all positive or all negative handle trivial cases
+        if np.all(arr_sorted > 0):
+            logger.info("All Lyapunov exponents positive: repeller.")
+            return None
+        if np.all(arr_sorted < 0):
+            logger.info("All Lyapunov exponents negative: attractor (D=0).")
+            return 0.0
+
+        s = 0.0
+        j = 0
+        for idx, lam in enumerate(arr_sorted):
+            s += lam
+            if s >= 0:
+                j = idx + 1
+        #     else:
+        #         # cumulative sum crossed negative at this lam, compute D using previous partial sum
+        #         if idx == 0:
+        #             return 0.0
+        #         sum_pos = np.sum(arr_sorted[:j])
+        #         if j < len(arr_sorted):
+        #             lam_next = arr_sorted[j]
+        #             D = j + sum_pos / abs(lam_next) if lam_next != 0 else float(j)
+        #             return float(D)
+        #         return float(j)
+        # # if loop completes, all cumulative sums >= 0
+        # return float(j)
+            else:
+                break
+        D = j + np.sum(arr_sorted[:j])/np.abs(arr_sorted[j])
+        return D.tolist()
+
+
+    def direct_method(self, path: str, order: int):
+        """
+        Read CSV time-series at `path`, compute coefficients using hints.kmcc,
+        derive/plot trajectories and compute Lyapunov.
+
+        This is a thin wrapper that imports `hints` lazily so the module can be imported
+        without hints present.
+        """
+        try:
+            import hints  
+        except Exception as exc:
+            raise RuntimeError(
+                "direct_method requires the external `hints` module (hints.kmcc)."
+            ) from exc
+
+        df_array = pd.read_csv(path).to_numpy()
+        hints_calc = hints.kmcc(ts_array=df_array, dt=self.dt, interaction_order=[i for i in range(0, order + 1)])
+        coefficient = hints_calc.get_coefficients()
+
+        number_time_series = df_array.shape[1]
+        # slicing coefficients: adapted from original but clarified
+        alpha = np.asarray(coefficient.iloc[0, :])
+        # linear block
+        A = np.asarray(coefficient.iloc[1:number_time_series + 1, :])
+        # quadratic rows: next n*(n+1)//2 rows
+        q_start = 1 + number_time_series
+        q_end = q_start + (number_time_series * (number_time_series + 1)) // 2
+        C = np.asarray(coefficient.iloc[q_start:q_end, :])
+        E = np.asarray(coefficient.iloc[q_end:, :])
+
+        f = self.jit_equation(alpha, A, C, E)
+        t_span = np.arange(self.t_i, self.t_f, self.dt)
+        lyaps = self.LE(f, self.initial_condition, t_span)
+        ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
+        t_eval, y_result = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        for i in range(number_time_series):
             lyap = np.average(lyaps[1000:,i])
             stderr = sem(lyaps[1000:,i])
             print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
-        return lyaps
+
+        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}
+
+    def output_hints_method(self, df_array: NDArray):
+
+        number_time_series = df_array.shape[1]
+        coefficient = pd.DataFrame(df_array)
+        alpha = np.asarray(coefficient.iloc[0, :])
+        # linear block
+        A = np.asarray(coefficient.iloc[1:number_time_series + 1, :])
+        # quadratic rows: next n*(n+1)//2 rows
+        q_start = 1 + number_time_series
+        q_end = q_start + (number_time_series * (number_time_series + 1)) // 2
+        C = np.asarray(coefficient.iloc[q_start:q_end, :])
+        E = np.asarray(coefficient.iloc[q_end:, :])
     
-    
-    @staticmethod
-    def KD(lyaps):
-        lyaps=np.round(lyaps,2)
-        s = 0
-        j=0
-        sorted_lyaps = np.sort(lyaps)[::-1]
-        if np.all(sorted_lyaps > 0):
-            print('repelling(diverging in all directions)')
-            return
-        elif np.all(sorted_lyaps < 0):
-            print('attractor')
-            return print('D=',0)
-        else:
-            for i in range(len(sorted_lyaps)):
-                s_old = np.copy(s)
-                s += sorted_lyaps[i]
-                if s>=0:j+=1
-                else:break
-                D = j + np.sum(sorted_lyaps[:j])/np.abs(sorted_lyaps[j])
-                return D.tolist()
-
-
-    def direct_method(self, path:str, order:int, build_tensor_3D, build_tensor_4D, jit_equation_0_3, plot_trajectory, LE, KD):
-        #load data
-        df_array = pd.read_csv(path).to_numpy()
-        hints_calculator = hints.kmcc(ts_array=df_array, dt=self.dt, interaction_order=[i for i in range(0, order+1)])
-        coefficient = hints_calculator.get_coefficients()
-        number_time_series = len(df_array[0])
-
-        alpha = np.asarray(coefficient.iloc[0,:])
-        A = np.asarray(coefficient.iloc[:number_time_series, :])
-        C = np.asarray(coefficient.iloc[number_time_series:int((number_time_series*(number_time_series+1))/2)+number_time_series, :])
-        E = np.asarray(coefficient.iloc[int((number_time_series*(number_time_series+1))/2)+number_time_series:, :])
-
-        C = build_tensor_3D(C, number_time_series)
-        E = build_tensor_4D(E, number_time_series)
-
-        f = jit_equation_0_3(alpha, A, C, E)
-        t_span = np.arange(self.t_i, self.t_f, self.dt) 
-        lyaps_np_th=LE(f,self.initial_condition,t_span)
-        KD(np.mean(lyaps_np_th[1000:,:],axis=0))
-        ts_np_th = plot_trajectory(f, initial_condition=self.initial_condition, t_span=(self.t_i,self.t_f), dt=self.dt)
-
-
-    def Data_methods(self, alpha:NDArray, A:NDArray, C:NDArray,  E:NDArray, build_tensor_3D, build_tensor_4D, jit_equation_0_3,
-                     plot_trajectory, LE, KD):
-        
-        # Make sure your inputs are properly shaped numpy arrays
-        f = jit_equation_0_3(alpha, A, C, E)
+        f = self.jit_equation(alpha, A, C, E)
         t_span = np.arange(self.t_i, self.t_f, self.dt)
-        lyaps_np_th=LE(f,self.initial_condition,t_span)
-        KD(np.mean(lyaps_np_th[1000:,:],axis=0))
-        ts_np_th = plot_trajectory(f, initial_condition=self.initial_condition, t_span=(self.t_i,self.t_f), dt=self.dt)
-        
-
-
-
-
-    
-        
+        lyaps = self.LE(f, self.initial_condition, t_span)
+        ky = self.KD(np.mean(lyaps[max(0, 1000):, :], axis=0))
+        t_eval, y_result, = self.plot_trajectory(f, self.initial_condition, (self.t_i, self.t_f), self.dt)
+        for i in range(number_time_series):
+            lyap = np.average(lyaps[1000:,i])
+            stderr = sem(lyaps[1000:,i])
+            print("%i. Lyapunov exponent: % .4f ± %.4f" % (i+1,lyap,stderr))
+        return {"t": t_eval, "y": y_result, "lyaps": lyaps, "ky": ky}

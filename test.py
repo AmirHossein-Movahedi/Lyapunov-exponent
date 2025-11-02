@@ -1,4 +1,4 @@
-from Lyapunov1 import Lyapunov
+from Lyapunov import Lyapunov
 import numpy as np
 import pandas as pd 
 
